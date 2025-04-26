@@ -4,6 +4,7 @@ credentials.json
 .env
 
 ### Cache and venv
+
 venv
 .DS_Store
 __pycache__
@@ -12,3 +13,6 @@ __pycache__
 driveup_backup
 driveup_state
 archive
+
+### Docs
+docs.html
