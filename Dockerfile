@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY index.py ./
 
-CMD ["python", "index.py"] 
+CMD ["python", "main.py"] 
