@@ -1,0 +1,13 @@
+services:
+  driveup:
+    build: .
+    container_name: driveup
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token.json:/app/token.json
+      - ./.env:/app/.env:ro
+      - ./driveup_backup:/app/driveup_backup
+      - ./driveup_state:/app/driveup_state
+      - ./archive:/app/archive
+    stdin_open: true
+    tty: true
