@@ -49,4 +49,4 @@ docker compose run --rm driveup python main.py --incremental --s3-bucket your-bu
 
 For complete setup instructions (Google Cloud prerequisites, first authorization, configuration options, troubleshooting, and more), please refer to the full documentation:
 
-**[https://eblet.tech/scripts/driveup/docs.html](https://eblet.tech/scripts/driveup/docs.html)**
+**[https://eblet.tech/scripts/driveup/docs_full.html](https://eblet.tech/scripts/driveup/docs_full.html)**
