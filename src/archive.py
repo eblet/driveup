@@ -13,61 +13,44 @@ log = logging.getLogger(__name__)
 
 def create_backup_archive(
     backup_dir: Path,
-    state_dir: Path,
-    s3_enabled: bool,
-    s3_client: Optional[Any],
-    s3_bucket: Optional[str],
-    s3_prefix: Optional[str],
-    dry_run: bool
-) -> Tuple[bool, Optional[Path]]:
+    # state_dir: Path, # No longer needed as state is part of backup_dir for simplicity in archiving
+    # s3_enabled: bool, # S3 logic is now handled externally
+    # s3_client: Optional[Any], # S3 logic is now handled externally
+    # s3_bucket: Optional[str], # S3 logic is now handled externally
+    # s3_prefix: Optional[str], # S3 logic is now handled externally
+    dry_run: bool,
+    mode: str = "full"
+) -> Tuple[bool, Optional[Path], Optional[str]]: # Returns success, archive_path, archive_name
     """
-    Creates a ZIP archive of the backup directory and optionally uploads it to S3.
-    Returns (success, archive_path).
+    Creates a ZIP archive of the backup directory.
+    Returns (success, archive_path, archive_name).
     """
     if dry_run:
         log.info("Skipping archive creation in dry run mode")
-        return True, None
+        return True, None, None
         
     try:
-        # Create archive filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        archive_name = f"drive_backup_{timestamp}.zip"
+        archive_name = f"drive_backup_{timestamp}_{mode}.zip"
         archive_path = config.ARCHIVE_DIR / archive_name
         
-        # Ensure archive directory exists
         config.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
         
-        # Create ZIP archive
-        log.info(f"Creating archive: {archive_path}")
+        log.info(f"Creating archive: {archive_path} from directory {backup_dir}")
         shutil.make_archive(
             str(archive_path.with_suffix("")),  # Remove .zip as make_archive adds it
             "zip",
-            backup_dir
+            root_dir=backup_dir, # Archive contents of backup_dir
+            base_dir="." # Archive all files/folders within backup_dir itself
         )
         
-        # Upload to S3 if enabled
-        if s3_enabled and s3_client and s3_bucket:
-            try:
-                # Construct S3 key
-                s3_key = f"{s3_prefix.rstrip('/')}/{archive_name}" if s3_prefix else archive_name
+        # S3 upload logic is removed from here
                 
-                log.info(f"Uploading archive to s3://{s3_bucket}/{s3_key}")
-                s3_client.upload_file(
-                    str(archive_path),
-                    s3_bucket,
-                    s3_key
-                )
-                log.info("Archive uploaded to S3 successfully")
-                
-            except Exception as e:
-                log.error(f"Failed to upload archive to S3: {e}")
-                # Continue even if S3 upload fails
-                
-        return True, archive_path
+        return True, archive_path, archive_name
         
     except Exception as e:
         log.error(f"Failed to create archive: {e}", exc_info=True)
-        return False, None
+        return False, None, None
 
 def cleanup_old_archives(
     max_age_days: int = 30,

@@ -13,19 +13,9 @@ from googleapiclient.discovery import Resource
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
-# S3 related imports (guarded by config check)
-from . import config
-if config.BOTO3_AVAILABLE:
-    from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
-else:
-    # Define dummy exceptions if Boto3 not available
-    NoCredentialsError = type('NoCredentialsError', (Exception,), {})
-    PartialCredentialsError = type('PartialCredentialsError', (Exception,), {})
-    ClientError = type('ClientError', (Exception,), {})
-
 # Local imports
 from . import utils # For sanitize_filename, int_to_column_letter
-# from . import config # Already imported for BOTO3 check
+from . import config # Ensure config is imported
 
 log = logging.getLogger(__name__)
 
@@ -153,13 +143,9 @@ def download_file(
     service: Resource,
     item: Dict[str, Any],
     local_path_base: Path, # Base path (directory + sanitized name, NO extension yet)
-    gspread_client: Optional[gspread.Client] = None,
-    s3_client: Optional[Any] = None, # Optional S3 client
-    s3_bucket: Optional[str] = None, # Optional S3 bucket
-    s3_base_prefix: Optional[str] = None, # Optional S3 base prefix for this drive backup
-    drive_backup_dir: Optional[Path] = None # Needed to calculate relative path for S3 key
+    gspread_client: Optional[gspread.Client] = None
 ) -> Tuple[bool, Path]:
-    """Downloads or exports a file. Optionally uploads to S3. Returns success flag and the final path (including extension)."""
+    """Downloads or exports a file. Returns success flag and the final path (including extension)."""
     item_id = item["id"]
     item_name = item.get("name", "_unnamed_")
     mime_type = item.get("mimeType", "")
@@ -319,18 +305,8 @@ def download_file(
 
                         log.info("%s: Sheet '%s' formulas saved to %s", log_prefix, worksheet.title, csv_formulas_path)
 
-                        # --- Upload CSV to S3 if enabled --- #
-                        if config.BOTO3_AVAILABLE and s3_client and s3_bucket and s3_base_prefix is not None and drive_backup_dir:
-                            try:
-                                csv_relative_path = csv_formulas_path.relative_to(drive_backup_dir)
-                                # S3 key should use POSIX separators
-                                csv_s3_key = f"{s3_base_prefix.rstrip('/')}/{csv_relative_path.as_posix()}"
-                                log.info(f"{log_prefix}: Uploading sheet formulas CSV to s3://{s3_bucket}/{csv_s3_key}")
-                                s3_client.upload_file(str(csv_formulas_path), s3_bucket, csv_s3_key)
-                                log.debug(f"{log_prefix}: Successfully uploaded CSV formulas to S3.")
-                            except (NoCredentialsError, PartialCredentialsError): log.error(f"{log_prefix}: AWS credentials not found for S3 CSV upload. Skipping S3.")
-                            except ClientError as e: log.error(f"{log_prefix}: AWS S3 client error uploading CSV formulas to s3://{s3_bucket}/{csv_s3_key}: {e}")
-                            except Exception as e: log.error(f"{log_prefix}: Unknown error during S3 CSV upload to s3://{s3_bucket}/{csv_s3_key}: {e}")
+                        # The S3 upload block for CSV files was here and has been removed.
+                        pass 
                     else:
                         log.info("%s: Sheet '%s' has no formulas, skipping CSV creation", log_prefix, worksheet.title)
 
@@ -344,25 +320,7 @@ def download_file(
         except gspread.exceptions.APIError as gspread_error: log.error("%s: gspread API error for sheet '%s': %s", log_prefix, item_name, gspread_error)
         except Exception as e: log.error("%s: Unknown error processing sheet '%s': %s", log_prefix, item_name, e, exc_info=True)
 
-    # --- S3 Upload Block (only if download was successful and S3 is configured) ---
-    if download_success and config.BOTO3_AVAILABLE and s3_client and s3_bucket and s3_base_prefix is not None and drive_backup_dir:
-        try:
-            # Calculate relative path from the drive's backup root
-            relative_path = final_local_path.relative_to(drive_backup_dir)
-            # Construct S3 key using POSIX separators, based on the drive-specific base prefix
-            s3_key = f"{s3_base_prefix.rstrip('/')}/{relative_path.as_posix()}"
-            log.info(f"{log_prefix}: Uploading main file to s3://{s3_bucket}/{s3_key}")
-            s3_client.upload_file(str(final_local_path), s3_bucket, s3_key)
-            log.debug(f"{log_prefix}: Successfully uploaded main file to S3.")
-        except (NoCredentialsError, PartialCredentialsError):
-            log.error(f"{log_prefix}: AWS credentials not found for S3 upload. Skipping S3 upload for this file.")
-            # Optionally disable S3 for the rest of the run? For now, just log per file.
-        except ClientError as e:
-            log.error(f"{log_prefix}: AWS S3 client error uploading to s3://{s3_bucket}/{s3_key}: {e}")
-            # Consider upload failure as non-critical for the overall backup? Yes.
-        except Exception as e:
-            log.error(f"{log_prefix}: Unknown error during S3 upload to s3://{s3_bucket}/{s3_key}: {e}")
-            # Treat as non-critical
+    # The S3 upload block for general files was here and has been removed.
 
     # Return download success status and the final path (which includes extension)
     return download_success, final_local_path 

@@ -41,8 +41,17 @@ docker compose run --rm driveup python main.py --full
 # Run an incremental sync (for regular backups)
 docker compose run --rm driveup python main.py --incremental
 
-# Run incremental sync with S3 upload
+# Run incremental sync with AWS S3 upload
 docker compose run --rm driveup python main.py --incremental --s3-bucket your-bucket-name --s3-prefix your/prefix/
+
+# Run with S3-compatible storage (non-AWS)
+docker compose run --rm driveup python main.py --incremental \
+  --s3-bucket your-bucket-name \
+  --s3-prefix your/prefix/ \
+  --s3-endpoint https://s3.your-provider.com \
+  --s3-region your-region \
+  --s3-access-key your-access-key \
+  --s3-secret-key your-secret-key
 ```
 
 ## Detailed Documentation

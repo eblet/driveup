@@ -26,14 +26,11 @@ def process_drive(
     drive_state_dir: Path,
     processed_shared_drive_ids: Set[str],
     incremental_flag: bool,
-    dry_run: bool,
-    s3_client: Optional[Any] = None,
-    s3_bucket: Optional[str] = None,
-    s3_base_prefix: Optional[str] = None
-) -> Tuple[int, int, int, int]:
+    dry_run: bool
+) -> Tuple[int, int, int, int, str]:
     """
     Process a single drive (My Drive or Shared Drive).
-    Returns (processed_count, downloaded_count, deleted_count, failed_count).
+    Returns (processed_count, downloaded_count, deleted_count, failed_count, actual_mode).
     """
     log.info(f"Processing drive: {drive_name} (ID: {drive_id if drive_id else 'My Drive'})")
     
@@ -93,10 +90,7 @@ def process_drive(
                 drive_backup_dir=drive_backup_dir,
                 state_map=state_map, # Pass the map to be populated
                 processed_shared_drive_ids=processed_shared_drive_ids,
-                dry_run=dry_run,
-                s3_client=s3_client,
-                s3_bucket=s3_bucket,
-                s3_base_prefix=s3_base_prefix
+                dry_run=dry_run
             )
             
             processed_count += processed
@@ -153,10 +147,7 @@ def process_drive(
                 state_map=state_map, # Pass the loaded state map
                 start_token=start_token, # Pass the loaded token
                 processed_shared_drive_ids=processed_shared_drive_ids,
-                dry_run=dry_run,
-                s3_client=s3_client,
-                s3_bucket=s3_bucket,
-                s3_base_prefix=s3_base_prefix
+                dry_run=dry_run
             )
             
             processed_count += processed
@@ -195,8 +186,9 @@ def process_drive(
             # Save state map as it is after the error?
             state_manager.save_drive_state(state_map, state_file)
     
+    actual_mode = "full" if needs_full_sync else "incremental"
     log.info(f"--- Finished processing for drive: {drive_name} --- Counts: Processed={processed_count}, Downloaded={downloaded_count}, Deleted={deleted_count}, Failed={failed_count}")
-    return processed_count, downloaded_count, deleted_count, failed_count
+    return processed_count, downloaded_count, deleted_count, failed_count, actual_mode
 
 def process_changes(
     drive_service: Resource,
@@ -207,10 +199,7 @@ def process_changes(
     state_map: Dict[str, Dict[str, Any]],
     start_token: str,
     processed_shared_drive_ids: Set[str],
-    dry_run: bool,
-    s3_client: Optional[Any] = None,
-    s3_bucket: Optional[str] = None,
-    s3_base_prefix: Optional[str] = None
+    dry_run: bool
 ) -> Tuple[int, int, int, int]:
     """
     Process changes from the Drive API.
@@ -287,11 +276,7 @@ def process_changes(
                                 service=drive_service,
                                 item=file_details, # Use file_details from the change
                                 local_path_base=target_path_base,
-                                gspread_client=gspread_client,
-                                s3_client=None,
-                                s3_bucket=None,
-                                s3_base_prefix=None,
-                                drive_backup_dir=config.SHARED_FILES_DIR
+                                gspread_client=gspread_client
                             )
                             if success:
                                 downloaded_count += 1
@@ -342,18 +327,14 @@ def process_changes(
                             service=drive_service,
                             item=file_details,
                             local_path_base=local_path,
-                            gspread_client=gspread_client,
-                            s3_client=s3_client,
-                            s3_bucket=s3_bucket,
-                            s3_base_prefix=s3_base_prefix,
-                            drive_backup_dir=drive_backup_dir
+                            gspread_client=gspread_client
                         )
                         
                         if success:
                             downloaded_count += 1
                             # Update state map
                             state_map[file_id] = {
-                                "path": str(final_path),
+                                "path": str(final_path.relative_to(drive_backup_dir)),
                                 "modifiedTime": change.get("time"),
                                 "is_folder": mime_type == config.FOLDER_MIME_TYPE
                             }
@@ -409,10 +390,7 @@ def perform_full_sync(
     drive_backup_dir: Path,
     state_map: Dict[str, Dict[str, Any]], # Pass the state map to populate it
     processed_shared_drive_ids: Set[str], # To skip shared drive items during My Drive sync
-    dry_run: bool = False,
-    s3_client: Optional[Any] = None,
-    s3_bucket: Optional[str] = None,
-    s3_base_prefix: Optional[str] = None
+    dry_run: bool = False
 ) -> Tuple[int, int, int, int]: # Returns processed, downloaded, deleted, failed counts
     """
     Performs a full sync by listing all files using files.list.
@@ -488,11 +466,7 @@ def perform_full_sync(
                                  service=drive_service,
                                  item=item,
                                  local_path_base=target_path_base,
-                                 gspread_client=gspread_client,
-                                 s3_client=None, # No S3 for these
-                                 s3_bucket=None,
-                                 s3_base_prefix=None,
-                                 drive_backup_dir=config.SHARED_FILES_DIR # Use SHARED_FILES_DIR as base
+                                 gspread_client=gspread_client
                              )
                              if success:
                                  downloaded_count += 1
@@ -596,11 +570,7 @@ def perform_full_sync(
                     service=drive_service,
                     item=item,
                     local_path_base=local_path_base, # Pass the path without extension initially
-                    gspread_client=gspread_client,
-                    s3_client=s3_client,
-                    s3_bucket=s3_bucket,
-                    s3_base_prefix=s3_base_prefix,
-                    drive_backup_dir=drive_backup_dir # Needed for S3 relative path
+                    gspread_client=gspread_client
                 )
 
                 if success:
