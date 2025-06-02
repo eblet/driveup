@@ -2,6 +2,42 @@ from typing import Optional, Any
 import boto3
 import config
 import log
+import os
+import argparse
+import logging.handlers
+from pathlib import Path
+import sys
+import platform
+import psutil
+
+def setup_logging():
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    log_format = "%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+    
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_dir / "backup_job.log",
+        maxBytes=10*1024*1024,  
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(logging.Formatter(log_format, date_format))
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter(log_format, date_format))
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    
+    sys_info_logger = logging.getLogger('system_info')
+    sys_info_logger.info(f"Python version: {sys.version}")
+    sys_info_logger.info(f"Platform: {platform.platform()}")
+    sys_info_logger.info(f"CPU count: {os.cpu_count()}")
+    sys_info_logger.info(f"Memory info: {psutil.virtual_memory()}")
 
 def setup_s3_client(s3_bucket: Optional[str], s3_endpoint_url: Optional[str] = None, s3_region: Optional[str] = None, s3_access_key: Optional[str] = None, s3_secret_key: Optional[str] = None) -> tuple[Optional[Any], bool]:
     """

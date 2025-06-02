@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-
 import argparse
 import logging
 import time
@@ -15,6 +14,7 @@ from src import sync
 from src import archive
 from src import utils
 from src import s3
+from src.logger import driveup_logger
 
 # Initialize logger using the config setup
 log = logging.getLogger(__name__)
@@ -108,13 +108,13 @@ def main():
     parser.add_argument("--s3-access-key", help="S3 access key ID")
     parser.add_argument("--s3-secret-key", help="S3 secret access key")
     parser.add_argument("--no-archive", action="store_true", help="Skip creating archive after backup")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                      help="Set the logging level")
     
     args = parser.parse_args()
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Initialize our custom logger
+    driveup_logger.setup(log_level=args.log_level)
     
     # Initialize S3 client using the new s3 module
     s3_client, s3_enabled = s3.setup_s3_client(
@@ -130,7 +130,7 @@ def main():
         creds = google_api.get_credentials()
         if not creds:
             log.error("Failed to get Google API credentials")
-            return
+            return 1
             
         # Initialize Google API clients
         drive_service = google_api.build('drive', 'v3', credentials=creds)
@@ -201,7 +201,7 @@ def main():
         total_downloaded = shared_downloaded + my_drive_downloaded
         total_deleted = shared_deleted + my_drive_deleted
         total_failed = shared_failed + my_drive_failed
-        # Определяем итоговый режим для архива
+        # Determine final archive mode
         all_modes = shared_modes + [my_drive_mode]
         archive_mode = "full" if "full" in all_modes else "incremental"
         # Create archive if requested and there were changes
@@ -232,8 +232,12 @@ def main():
         log.info(f"  Total files deleted: {total_deleted}")
         log.info(f"  Total files failed: {total_failed}")
         
+        # Write final summary to log file
+        driveup_logger.write_summary()
+        
     except Exception as e:
         log.error(f"Backup failed: {e}", exc_info=True)
+        driveup_logger.write_summary()  # Write summary even if we fail
         return 1
         
     return 0

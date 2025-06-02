@@ -66,11 +66,11 @@ def upload_archive_to_s3(archive_path: str, s3_client: Any, s3_bucket: str, s3_p
         s3_key = f"{s3_prefix.rstrip('/')}/{archive_name}" if s3_prefix else archive_name
         log.info(f"Uploading archive to s3://{s3_bucket}/{s3_key}")
         
-        # Читаем файл в память
+        # Read file into memory
         with open(archive_path, 'rb') as f:
             file_data = f.read()
         
-        # Загружаем через put_object
+        # Upload using put_object
         s3_client.put_object(
             Bucket=s3_bucket,
             Key=s3_key,

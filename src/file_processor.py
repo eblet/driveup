@@ -16,6 +16,7 @@ from googleapiclient.http import MediaIoBaseDownload
 # Local imports
 from . import utils # For sanitize_filename, int_to_column_letter
 from . import config # Ensure config is imported
+from .logger import driveup_logger
 
 log = logging.getLogger(__name__)
 
@@ -177,17 +178,21 @@ def download_file(
             try:
                 local_path_base.mkdir(parents=True, exist_ok=True)
                 log.debug(f"{log_prefix}: Ensured local folder exists: {local_path_base}")
+                driveup_logger.log_file_status(str(local_path_base), "downloaded")
             except OSError as e:
                 log.error(f"{log_prefix}: Failed to create local folder {local_path_base}: {e}")
+                driveup_logger.log_file_status(str(local_path_base), "failed", str(e))
                 return False, local_path_base # Cannot proceed if folder creation fails
         elif not local_path_base.is_dir():
              log.error(f"{log_prefix}: Expected path for folder is not a directory: {local_path_base}")
+             driveup_logger.log_file_status(str(local_path_base), "failed", "Path exists but is not a directory")
              return False, local_path_base
         return True, final_local_path # Nothing more to do for a folder
 
     if request is None:
         # This case should ideally not be reached if mime_type is folder or handled above
         log.warning("%s: Could not determine download/export action for MIME type '%s'", log_prefix, mime_type)
+        driveup_logger.log_file_status(str(final_local_path), "skipped", f"Unknown MIME type: {mime_type}")
         return False, final_local_path
 
     # --- Download Block --- Ensure parent directory exists --- #
@@ -200,6 +205,7 @@ def download_file(
             parent_dir.mkdir(parents=True, exist_ok=True)
         elif not parent_dir.is_dir():
              log.error("%s: Parent path %s is not a directory! Cannot download file.", log_prefix, parent_dir)
+             driveup_logger.log_file_status(str(final_local_path), "failed", "Parent path is not a directory")
              return False, final_local_path
 
         # Proceed with download/export
@@ -228,6 +234,7 @@ def download_file(
                     raise download_err # Reraise to be caught by the outer try block
             pbar.close()
         log.debug("%s: Successfully downloaded/exported to %s", log_prefix, final_local_path)
+        driveup_logger.log_file_status(str(final_local_path), "downloaded")
         download_success = True
 
     except HttpError as error:
@@ -236,6 +243,7 @@ def download_file(
         if final_local_path.exists():
             try: final_local_path.unlink(missing_ok=True)
             except OSError as e: log.warning(f"Could not remove partially downloaded file {final_local_path}: {e}")
+        driveup_logger.log_file_status(str(final_local_path), "failed", f"API error: {error}")
         return False, final_local_path
     except IOError as e:
         log.error("%s: File system error writing %s: %s", log_prefix, final_local_path, e)
@@ -243,6 +251,7 @@ def download_file(
         if final_local_path.exists():
             try: final_local_path.unlink(missing_ok=True)
             except OSError as e: log.warning(f"Could not remove partially downloaded file {final_local_path}: {e}")
+        driveup_logger.log_file_status(str(final_local_path), "failed", f"I/O error: {e}")
         return False, final_local_path
     except Exception as e:
         log.error("%s: Unknown error during download to %s: %s", log_prefix, final_local_path, e, exc_info=True)
@@ -250,6 +259,7 @@ def download_file(
         if final_local_path.exists():
             try: final_local_path.unlink(missing_ok=True)
             except OSError as e: log.warning(f"Could not remove partially downloaded file {final_local_path}: {e}")
+        driveup_logger.log_file_status(str(final_local_path), "failed", f"Unknown error: {e}")
         return False, final_local_path
 
     # --- Google Sheets Post-processing --- (Only if download succeeded)
@@ -270,6 +280,7 @@ def download_file(
                     formatted_values = worksheet.get_all_values(value_render_option=ValueRenderOption.formatted)
                 except Exception as sheet_error:
                      log.error("%s: Failed to get data for sheet '%s': %s", log_prefix, worksheet.title, sheet_error)
+                     driveup_logger.log_file_status(str(csv_formulas_path), "failed", f"Failed to get sheet data: {sheet_error}")
                      continue # Skip this sheet
 
                 try:
@@ -304,23 +315,34 @@ def download_file(
                                 f_csv.write(f'{coord},"{formula}","{value}"\n')
 
                         log.info("%s: Sheet '%s' formulas saved to %s", log_prefix, worksheet.title, csv_formulas_path)
-
-                        # The S3 upload block for CSV files was here and has been removed.
-                        pass 
+                        driveup_logger.log_file_status(str(csv_formulas_path), "downloaded")
                     else:
                         log.info("%s: Sheet '%s' has no formulas, skipping CSV creation", log_prefix, worksheet.title)
+                        driveup_logger.log_file_status(str(csv_formulas_path), "skipped", "No formulas found")
 
-                except IOError as io_err: log.error("%s: Error writing formula CSV file %s: %s", log_prefix, csv_formulas_path, io_err)
-                except Exception as e: log.error("%s: Unknown error writing formulas CSV for sheet '%s': %s", log_prefix, worksheet.title, e, exc_info=True)
+                except IOError as io_err:
+                    log.error("%s: Error writing formula CSV file %s: %s", log_prefix, csv_formulas_path, io_err)
+                    driveup_logger.log_file_status(str(csv_formulas_path), "failed", f"I/O error: {io_err}")
+                except Exception as e:
+                    log.error("%s: Unknown error writing formulas CSV for sheet '%s': %s", log_prefix, worksheet.title, e, exc_info=True)
+                    driveup_logger.log_file_status(str(csv_formulas_path), "failed", f"Unknown error: {e}")
 
         except HttpError as sheet_error:
              # Handle specific API errors like permission denied (403)
-            if sheet_error.resp.status == 403: log.error("%s: Access denied (403) opening sheet '%s'. Check permissions.", log_prefix, item_name)
-            else: log.error("%s: Google Sheets API error (%s) for sheet '%s': %s", log_prefix, sheet_error.resp.status, item_name, sheet_error)
-        except gspread.exceptions.APIError as gspread_error: log.error("%s: gspread API error for sheet '%s': %s", log_prefix, item_name, gspread_error)
-        except Exception as e: log.error("%s: Unknown error processing sheet '%s': %s", log_prefix, item_name, e, exc_info=True)
+            if sheet_error.resp.status == 403:
+                log.error("%s: Access denied (403) opening sheet '%s'. Check permissions.", log_prefix, item_name)
+                driveup_logger.log_file_status(str(final_local_path), "failed", "Access denied (403)")
+            else:
+                log.error("%s: Google Sheets API error (%s) for sheet '%s': %s", log_prefix, sheet_error.resp.status, item_name, sheet_error)
+                driveup_logger.log_file_status(str(final_local_path), "failed", f"Sheets API error: {sheet_error}")
+        except gspread.exceptions.APIError as gspread_error:
+            log.error("%s: gspread API error for sheet '%s': %s", log_prefix, item_name, gspread_error)
+            driveup_logger.log_file_status(str(final_local_path), "failed", f"gspread API error: {gspread_error}")
+        except Exception as e:
+            log.error("%s: Unknown error processing sheet '%s': %s", log_prefix, item_name, e, exc_info=True)
+            driveup_logger.log_file_status(str(final_local_path), "failed", f"Unknown error processing sheet: {e}")
 
-    # The S3 upload block for general files was here and has been removed.
+    # Removed S3 upload block for general files
 
     # Return download success status and the final path (which includes extension)
     return download_success, final_local_path 
