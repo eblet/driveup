@@ -8,6 +8,7 @@ services:
       - ./.env:/app/.env:ro
       - ./driveup_backup:/app/driveup_backup
       - ./driveup_state:/app/driveup_state
-      - ./archive:/app/archive
+      - ./driveup_archive:/app/driveup_archive
+      - ./driveup_logs:/app/driveup_logs
     stdin_open: true
     tty: true
