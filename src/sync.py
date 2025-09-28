@@ -39,6 +39,7 @@ def process_drive(
     downloaded_count = 0
     deleted_count = 0
     failed_count = 0
+    shortcuts_skipped_count = 0  # Track skipped Google Shortcuts
     
     # Setup state files
     state_file = drive_state_dir / (config.STATE_MAP_DRY_RUN_FILENAME if dry_run else config.STATE_MAP_FILENAME)
@@ -82,7 +83,7 @@ def process_drive(
         log.info(f"Starting full sync for {drive_name} using files.list")
         try:
             # Perform the full sync which populates the state_map
-            processed, downloaded, deleted, failed = perform_full_sync(
+            processed, downloaded, deleted, failed, shortcuts_skipped = perform_full_sync(
                 drive_service=drive_service,
                 gspread_client=gspread_client,
                 drive_id=drive_id,
@@ -97,9 +98,21 @@ def process_drive(
             downloaded_count += downloaded
             # deleted_count is 0 from perform_full_sync
             failed_count += failed
+            shortcuts_skipped_count += shortcuts_skipped
             
             # After successful full sync, get the initial start token for the *next* run
-            if failed_count == 0: # Only get token if sync seemed okay
+            # Calculate success rate - save token if 98%+ successful (excluding Google Shortcuts from calculation)
+            effective_processed = processed_count  # Total processed files (including shortcuts that were attempted)
+            critical_failures = failed_count  # All failures are considered for now
+            
+            success_rate = (effective_processed - critical_failures) / effective_processed if effective_processed > 0 else 0
+            success_percentage = success_rate * 100
+            
+            if shortcuts_skipped_count > 0:
+                log.info(f"Full sync for {drive_name}: {shortcuts_skipped_count} Google Shortcuts were skipped (not counted as failures)")
+            
+            if success_rate >= 0.98: # Save token if 98%+ successful
+                log.info(f"Full sync for {drive_name} achieved {success_percentage:.1f}% success rate ({effective_processed - critical_failures}/{effective_processed}). Saving token.")
                 new_start_token = state_manager.get_initial_start_page_token(drive_service, drive_id)
                 if new_start_token:
                     if not dry_run:
@@ -118,7 +131,7 @@ def process_drive(
                      state_manager.save_drive_state(state_map, state_file)
                      failed_count += 1 # Add a failure for the token fetch
             else:
-                log.error(f"Full sync for {drive_name} encountered errors ({failed_count}). State may be incomplete. Token not fetched/saved.")
+                log.warning(f"Full sync for {drive_name} had {success_percentage:.1f}% success rate ({processed_count - failed_count}/{processed_count}). Token not saved due to low success rate (<98%).")
                 # Save potentially incomplete state anyway for debugging?
                 state_manager.save_drive_state(state_map, state_file)
                 
@@ -244,14 +257,14 @@ def process_changes(
                 if drive_id and drive_id in processed_shared_drive_ids:
                     continue
                     
-                # --- Skip Shared Drive files when processing 'My Drive' incrementally ---
+                        # --- Skip Shared Drive files when processing 'My Drive' incrementally ---
                 is_my_drive_processing = drive_id is None
                 shared_drive_id = file_details.get("driveId") if file_details else None # Get driveId from file_details if available
 
                 # We only apply this logic if the change is NOT a deletion and we are in My Drive sync
                 if is_my_drive_processing and shared_drive_id and not file_details.get("trashed", False):
                     if shared_drive_id in processed_shared_drive_ids:
-                        log.debug(f"Skipping change for file '{file_details.get('name', file_id)}' during 'My Drive' sync because its Shared Drive {shared_drive_id} is processed separately.")
+                        # Skip logging for each skipped file to reduce log spam
                         continue # Skip processing this change
                     else:
                         # Handle change for item belonging to a shared drive NOT processed separately
@@ -338,7 +351,9 @@ def process_changes(
                                 "modifiedTime": change.get("time"),
                                 "is_folder": mime_type == config.FOLDER_MIME_TYPE
                             }
-                            log.info(f"Downloaded/updated: {file_name}")
+                            # Reduce logging frequency - only log every 100th file or important files
+                            if processed_count % 100 == 0 or mime_type in config.GOOGLE_DOCS_MIMETYPES:
+                                log.info(f"Downloaded/updated: {file_name} (processed {processed_count} items)")
                         else:
                             failed_count += 1
                             log.error(f"Failed to download/update: {file_name}")
@@ -391,7 +406,7 @@ def perform_full_sync(
     state_map: Dict[str, Dict[str, Any]], # Pass the state map to populate it
     processed_shared_drive_ids: Set[str], # To skip shared drive items during My Drive sync
     dry_run: bool = False
-) -> Tuple[int, int, int, int]: # Returns processed, downloaded, deleted, failed counts
+) -> Tuple[int, int, int, int, int]: # Returns processed, downloaded, deleted, failed, shortcuts_skipped counts
     """
     Performs a full sync by listing all files using files.list.
     Populates the state_map.
@@ -402,6 +417,7 @@ def perform_full_sync(
     downloaded_count = 0
     deleted_count = 0 # Not applicable in full sync from scratch
     failed_count = 0
+    shortcuts_skipped_count = 0
     all_items_map = {} # Temporary map to hold all fetched items {id: item}
 
     # --- 1. Fetch all items using files.list ---
@@ -434,6 +450,7 @@ def perform_full_sync(
             for item in items:
                 # Skip shortcuts (though field wasn't requested, good practice)
                 if item.get("mimeType") == "application/vnd.google-apps.shortcut":
+                    shortcuts_skipped_count += 1
                     continue
 
                 # --- Filter out Shared Drive items when processing 'My Drive' ---
@@ -441,12 +458,14 @@ def perform_full_sync(
                 item_belongs_to_shared_drive_id = item.get("driveId")
                 if is_my_drive_processing and item_belongs_to_shared_drive_id:
                     if item_belongs_to_shared_drive_id in processed_shared_drive_ids:
-                         log.debug(f"Skipping item '{item.get('name')}' ({item['id']}) during 'My Drive' full sync because its Shared Drive {item_belongs_to_shared_drive_id} is processed separately.")
+                         # Skip debug logging to reduce spam
                          continue # Skip this item, it belongs to a drive processed elsewhere
                     else:
                          # Handle item belonging to a shared drive NOT processed separately
                          item_name = item.get("name", "_unnamed_")
-                         log.warning(f"Item '{item_name}' ({item['id']}) found during 'My Drive' sync belongs to Shared Drive {item_belongs_to_shared_drive_id} (NOT processed separately). Downloading to '{config.SHARED_FILES_DIR_NAME}'.")
+                         # Only log first few items to avoid spam
+                         if processed_count < 5:
+                             log.warning(f"Item '{item_name}' ({item['id']}) found during 'My Drive' sync belongs to Shared Drive {item_belongs_to_shared_drive_id} (NOT processed separately). Downloading to '{config.SHARED_FILES_DIR_NAME}'.")
                          target_dir = config.SHARED_FILES_DIR / item_belongs_to_shared_drive_id # Subfolder per drive ID
                          target_dir.mkdir(parents=True, exist_ok=True)
                          target_path_base = target_dir / utils.sanitize_filename(item_name)
@@ -522,6 +541,10 @@ def perform_full_sync(
 
     # --- 2. Process all fetched (or sampled) items ---
     log.info(f"Processing {len(items_to_process_list)} items for full sync on '{drive_name}'...")
+    
+    # Progress reporting
+    total_items = len(items_to_process_list)
+    last_progress_report = 0
 
     for item in items_to_process_list:
         processed_count += 1
@@ -529,6 +552,12 @@ def perform_full_sync(
         item_name = item.get("name", "_unnamed_")
         mime_type = item.get("mimeType")
         is_folder = mime_type == config.FOLDER_MIME_TYPE
+        
+        # Report progress every 10% or every 500 items
+        progress_percentage = (processed_count * 100) // total_items
+        if progress_percentage >= last_progress_report + 10 or processed_count % 500 == 0:
+            log.info(f"Full sync progress: {processed_count}/{total_items} ({progress_percentage}%) - Current: {item_name[:50]}...")
+            last_progress_report = progress_percentage
 
         try:
             # Get local path using the reconstructor
@@ -590,4 +619,4 @@ def perform_full_sync(
             failed_count += 1
 
     log.info(f"Full sync processing for '{drive_name}' finished.")
-    return processed_count, downloaded_count, deleted_count, failed_count
+    return processed_count, downloaded_count, deleted_count, failed_count, shortcuts_skipped_count

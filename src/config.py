@@ -72,6 +72,10 @@ DRY_RUN_SAMPLE_SIZE = get_int_env("DRY_RUN_SAMPLE_SIZE", 10)
 dry_run_max_size_mb = get_int_env("DRY_RUN_MAX_FILE_SIZE_MB", 1)
 DRY_RUN_MAX_FILE_SIZE_BYTES = dry_run_max_size_mb * 1024 * 1024
 
+# Google Drive export size limits (approximate)
+max_export_size_mb = get_int_env("MAX_EXPORT_SIZE_MB", 50)  # Google Docs export limit is around 50MB
+MAX_EXPORT_SIZE_BYTES = max_export_size_mb * 1024 * 1024
+
 # --- Logging Setup ---
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 valid_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}

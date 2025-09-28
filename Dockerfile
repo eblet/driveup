@@ -14,7 +14,8 @@ ENV PYTHONPATH="/app/src" \
 
 COPY --from=builder /install /usr/local
 
-COPY . .
-
+COPY main.py .
+COPY src/ src/
+COPY requirements.txt .
 
 CMD ["python", "main.py"]

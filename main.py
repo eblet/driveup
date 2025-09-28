@@ -204,15 +204,20 @@ def main():
         # Determine final archive mode
         all_modes = shared_modes + [my_drive_mode]
         archive_mode = "full" if "full" in all_modes else "incremental"
-        # Create archive if requested and there were changes
-        if not args.no_archive and (total_downloaded > 0 or total_deleted > 0):
+        # Create archive if requested and there were changes (or always in dry-run for S3 testing)
+        should_create_archive = not args.no_archive and (total_downloaded > 0 or total_deleted > 0 or args.dry_run)
+        if should_create_archive:
             archive_created, archive_path, archive_name = archive.create_backup_archive(
                 backup_dir=config.BASE_DOWNLOAD_DIR,
                 dry_run=args.dry_run,
                 mode=archive_mode
             )
             if archive_created and archive_path and archive_name:
-                log.info(f"Backup archived locally to: {archive_path}")
+                if args.dry_run:
+                    log.info(f"Test archive created for S3 verification: {archive_path}")
+                else:
+                    log.info(f"Backup archived locally to: {archive_path}")
+                
                 if s3_enabled and s3_client:
                     s3_upload_success = s3.upload_archive_to_s3(
                         archive_path=str(archive_path),
@@ -221,8 +226,23 @@ def main():
                         s3_prefix=args.s3_prefix,
                         archive_name=archive_name
                     )
-                    if not s3_upload_success:
-                        log.error("Failed to upload archive to S3. The archive remains available locally.")
+                    if s3_upload_success:
+                        if args.dry_run:
+                            log.info("✅ S3 upload test SUCCESSFUL! S3 configuration is working correctly.")
+                            # Clean up test archive after successful upload
+                            try:
+                                archive_path.unlink()
+                                log.info(f"Test archive cleaned up: {archive_name}")
+                            except Exception as e:
+                                log.warning(f"Failed to clean up test archive: {e}")
+                        else:
+                            log.info("Archive uploaded to S3 successfully")
+                    else:
+                        if args.dry_run:
+                            log.error("❌ S3 upload test FAILED! Check S3 configuration and credentials.")
+                        else:
+                            log.error("Failed to upload archive to S3. The archive remains available locally.")
+                
                 if not args.dry_run:
                     archive.cleanup_old_archives(max_age_days=30)
         # Print summary
