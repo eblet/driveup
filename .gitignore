@@ -1,12 +1,9 @@
-### Secrets
-token.json
-credentials.json
-.env
-
 ### Cache and venv
 venv
 .DS_Store
 __pycache__
+logs
+local_logs
 
 ### Work dirs
 archive
@@ -15,4 +12,9 @@ driveup_backup
 driveup_state
 
 ### Docs
-docs
+docs.html
+
+### Envs
+.env
+credentials.json
+token.json

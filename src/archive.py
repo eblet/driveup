@@ -13,21 +13,17 @@ log = logging.getLogger(__name__)
 
 def create_backup_archive(
     backup_dir: Path,
-    # state_dir: Path, # No longer needed as state is part of backup_dir for simplicity in archiving
-    # s3_enabled: bool, # S3 logic is now handled externally
-    # s3_client: Optional[Any], # S3 logic is now handled externally
-    # s3_bucket: Optional[str], # S3 logic is now handled externally
-    # s3_prefix: Optional[str], # S3 logic is now handled externally
     dry_run: bool,
     mode: str = "full"
 ) -> Tuple[bool, Optional[Path], Optional[str]]: # Returns success, archive_path, archive_name
     """
     Creates a ZIP archive of the backup directory.
+    For dry-run mode, creates a small test archive to verify S3 upload functionality.
     Returns (success, archive_path, archive_name).
     """
     if dry_run:
-        log.info("Skipping archive creation in dry run mode")
-        return True, None, None
+        log.info("Creating small test archive for dry-run S3 upload verification")
+        return _create_test_archive(mode)
         
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -50,6 +46,68 @@ def create_backup_archive(
         
     except Exception as e:
         log.error(f"Failed to create archive: {e}", exc_info=True)
+        return False, None, None
+
+def _create_test_archive(mode: str = "full") -> Tuple[bool, Optional[Path], Optional[str]]:
+    """
+    Creates a small test archive for dry-run S3 upload verification.
+    Returns (success, archive_path, archive_name).
+    """
+    import tempfile
+    import json
+    
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_name = f"drive_backup_{timestamp}_{mode}_test.zip"
+        archive_path = config.ARCHIVE_DIR / archive_name
+        
+        config.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Create temporary directory with test content
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            
+            # Create test files
+            test_info = {
+                "test_type": "dry_run_s3_upload_verification",
+                "timestamp": timestamp,
+                "mode": mode,
+                "message": "This is a test archive created during dry-run to verify S3 upload functionality",
+                "size": "small"
+            }
+            
+            # Write test JSON file
+            with open(temp_path / "test_info.json", "w") as f:
+                json.dump(test_info, f, indent=2)
+            
+            # Write test text file
+            with open(temp_path / "test_content.txt", "w") as f:
+                f.write("This is a test archive for S3 upload verification.\n")
+                f.write(f"Created at: {timestamp}\n")
+                f.write(f"Mode: {mode}\n")
+                f.write("If you see this file in S3, the upload is working correctly!\n")
+            
+            # Create small test folder structure
+            (temp_path / "test_folder").mkdir()
+            with open(temp_path / "test_folder" / "nested_file.txt", "w") as f:
+                f.write("Test file in subfolder\n")
+            
+            log.info(f"Creating test archive: {archive_path}")
+            shutil.make_archive(
+                str(archive_path.with_suffix("")),  # Remove .zip as make_archive adds it
+                "zip",
+                root_dir=temp_path,
+                base_dir="."
+            )
+        
+        # Check archive size
+        archive_size = archive_path.stat().st_size
+        log.info(f"Test archive created successfully: {archive_name} ({archive_size} bytes)")
+        
+        return True, archive_path, archive_name
+        
+    except Exception as e:
+        log.error(f"Failed to create test archive: {e}", exc_info=True)
         return False, None, None
 
 def cleanup_old_archives(

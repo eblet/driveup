@@ -144,32 +144,56 @@ def download_file(
     service: Resource,
     item: Dict[str, Any],
     local_path_base: Path, # Base path (directory + sanitized name, NO extension yet)
-    gspread_client: Optional[gspread.Client] = None
+    gspread_client: Optional[gspread.Client] = None,
+    retry_count: int = 0
 ) -> Tuple[bool, Path]:
     """Downloads or exports a file. Returns success flag and the final path (including extension)."""
     item_id = item["id"]
     item_name = item.get("name", "_unnamed_")
     mime_type = item.get("mimeType", "")
     log_prefix = f"File '{item_name}' ({item_id})"
+    
+    # Protect against circular retry loops
+    MAX_RETRY_ATTEMPTS = 2
+    if retry_count > MAX_RETRY_ATTEMPTS:
+        log.warning("%s: Maximum retry attempts (%d) exceeded. Skipping file to prevent circular errors.", 
+                   log_prefix, MAX_RETRY_ATTEMPTS)
+        driveup_logger.log_file_status(str(local_path_base), "skipped", 
+                                     f"Max retry attempts exceeded ({retry_count})")
+        return False, local_path_base
 
     request = None
     is_google_doc = False
     final_local_path = local_path_base # Start with the base path
 
     # Determine download/export request and final local path with extension
+    # Check if this is a Google Docs file by MIME type ONLY (not by file extension)
+    file_extension = Path(item_name).suffix.lower()
+    
+    # LOG MIME TYPE FOR ANALYSIS (only for problematic extensions with suspicious MIME types)
+    if file_extension in [".docx", ".xlsx", ".pptx"] and mime_type in config.GOOGLE_MIME_TYPES_EXPORT:
+        log.warning("%s: SUSPICIOUS: MS Office extension '%s' but Google MIME '%s'", 
+                    log_prefix, file_extension, mime_type)
+    
     if mime_type in config.GOOGLE_MIME_TYPES_EXPORT:
         is_google_doc = True
         export_info = config.GOOGLE_MIME_TYPES_EXPORT[mime_type]
         export_mime_type = export_info["mimeType"]
         # Append the correct extension for Google Docs export
         final_local_path = local_path_base.with_suffix(export_info["extension"])
-        log.info("%s: Exporting as %s to %s", log_prefix, export_mime_type, final_local_path)
+        
+        # Check if file size is available and might be too large for export
+        file_size_bytes = item.get("size")
+        if file_size_bytes and int(file_size_bytes) > config.MAX_EXPORT_SIZE_BYTES:
+            log.warning("%s: File size (%s bytes) may exceed export limit. Attempting export anyway.", log_prefix, file_size_bytes)
+        
+        # Exporting Google Doc (no log to reduce noise)
         request = service.files().export_media(fileId=item_id, mimeType=export_mime_type)
     elif mime_type != config.FOLDER_MIME_TYPE:
          # Regular file download, path already includes sanitized name. Extension *should* be part of the name.
          # However, Drive names might lack extensions. Let's assume `local_path_base` is sufficient.
          # If `item_name` often lacks extensions, we might need `fileExtension` field from API.
-         log.info("%s: Downloading to %s", log_prefix, final_local_path)
+         # Downloading regular file (no log to reduce noise)
          request = service.files().get_media(fileId=item_id, supportsAllDrives=True)
     else: # Folder
         # For folders, the `local_path_base` should already exist or be created by `reconstruct_path`.
@@ -212,10 +236,11 @@ def download_file(
         with open(final_local_path, "wb") as fh:
             # Get file size for progress bar, if available (not usually for exports)
             file_size = item.get("size")
-            # Only show tqdm progress bar for actual downloads with known size > 0
-            use_tqdm = file_size is not None and not is_google_doc and int(file_size) > 0
+            # Only show tqdm progress bar for large files to reduce log spam
+            file_size_int = int(file_size) if file_size else 0
+            use_tqdm = file_size is not None and not is_google_doc and file_size_int > 1024 * 1024  # Only for files > 1MB
             pbar = tqdm.tqdm(
-                total=int(file_size) if use_tqdm else None,
+                total=file_size_int if use_tqdm else None,
                 unit="B", unit_scale=True, desc=f"Downloading {final_local_path.name}", leave=False, disable=not use_tqdm
             )
             downloader = MediaIoBaseDownload(fh, request, chunksize=1024 * 1024 * 10) # 10MB chunks
@@ -228,22 +253,82 @@ def download_file(
                         # Update progress based on resumable_progress
                         pbar.update(status.resumable_progress - pbar.n)
                 except HttpError as download_err:
-                    # Handle potential resumable download errors (e.g., 404 if file changed/deleted during download)
-                    log.error("%s: HTTP error during download chunk: %s", log_prefix, download_err)
-                    # Rethrow or handle specific statuses if needed
-                    raise download_err # Reraise to be caught by the outer try block
+                    # Handle specific errors that can occur during download/export
+                    if download_err.resp.status == 403 and "fileNotExportable" in str(download_err):
+                        # File is a regular file that was mistakenly attempted to export
+                        log.warning("%s: File not exportable (fileNotExportable) during chunk download. Attempting regular download.", log_prefix)
+                        pbar.close()  # Close progress bar before returning
+                        # Clean up the partially created file
+                        if final_local_path.exists():
+                            try: final_local_path.unlink(missing_ok=True)
+                            except OSError as e: log.warning(f"Could not remove partial file {final_local_path}: {e}")
+                        # Attempting regular download (no log to reduce noise)
+                        # Force regular download by temporarily changing the item
+                        retry_item = item.copy()
+                        retry_item["mimeType"] = "application/octet-stream"  # Force regular download
+                        return download_file(service, retry_item, local_path_base, gspread_client, retry_count + 1)
+                    else:
+                        # Handle other download errors (e.g., 404 if file changed/deleted during download)
+                        log.error("%s: HTTP error during download chunk: %s", log_prefix, download_err)
+                        # Rethrow or handle specific statuses if needed
+                        raise download_err # Reraise to be caught by the outer try block
             pbar.close()
-        log.debug("%s: Successfully downloaded/exported to %s", log_prefix, final_local_path)
+        # File successfully processed (no log to reduce noise)
         driveup_logger.log_file_status(str(final_local_path), "downloaded")
         download_success = True
 
     except HttpError as error:
-        log.error("%s: Google Drive API error (%s) during download/export to %s: %s", log_prefix, error.resp.status, final_local_path, error)
+        # Handle specific API errors
+        if error.resp.status == 403 and "exportSizeLimitExceeded" in str(error):
+            log.warning("%s: File too large for export (exportSizeLimitExceeded). Skipping.", log_prefix)
+            driveup_logger.log_file_status(str(final_local_path), "skipped", "File too large for export")
+            return False, final_local_path
+        elif error.resp.status == 403 and "fileNotDownloadable" in str(error):
+            # File is a Google Docs file that was misidentified - try to export it
+            log.warning("%s: File not downloadable (fileNotDownloadable). Attempting to export as Google Doc (retry %d).", log_prefix, retry_count + 1)
+            # Force Google Doc export by setting a Google Apps MIME type
+            retry_item = item.copy()
+            file_extension = Path(item["name"]).suffix.lower()
+            if file_extension == ".docx":
+                retry_item["mimeType"] = "application/vnd.google-apps.document"
+            elif file_extension == ".xlsx": 
+                retry_item["mimeType"] = "application/vnd.google-apps.spreadsheet"
+            elif file_extension == ".pptx":
+                retry_item["mimeType"] = "application/vnd.google-apps.presentation"
+            else:
+                retry_item["mimeType"] = "application/vnd.google-apps.document"  # Default
+            log.warning("%s: RETRY: Changing MIME '%s' → '%s' (Google export)", 
+                        log_prefix, mime_type, retry_item["mimeType"])
+            return download_file(service, retry_item, local_path_base, gspread_client, retry_count + 1)
+        elif error.resp.status == 403 and "fileNotExportable" in str(error):
+            # File is a regular file (not Google Docs) that was mistakenly attempted to export - try regular download
+            log.warning("%s: File not exportable (fileNotExportable). Attempting regular download.", log_prefix)
+            # Attempting regular download (no log to reduce noise)
+            # Force regular download by temporarily changing the item
+            retry_item = item.copy()
+            retry_item["mimeType"] = "application/octet-stream"  # Force regular download
+            return download_file(service, retry_item, local_path_base, gspread_client, retry_count + 1)
+        elif error.resp.status == 400 and "badRequest" in str(error):
+            # File conversion not supported - try regular download
+            log.warning("%s: Conversion not supported (badRequest). Attempting regular download.", log_prefix)
+            # Attempting regular download (no log to reduce noise)
+            # Force regular download by temporarily changing the item
+            retry_item = item.copy()
+            retry_item["mimeType"] = "application/octet-stream"  # Force regular download
+            log.warning("%s: RETRY: Changing MIME '%s' → '%s' (direct download)", 
+                        log_prefix, mime_type, retry_item["mimeType"])
+            return download_file(service, retry_item, local_path_base, gspread_client, retry_count + 1)
+        elif error.resp.status == 403:
+            log.error("%s: Access denied (403) during export/download: %s", log_prefix, error)
+            driveup_logger.log_file_status(str(final_local_path), "failed", f"Access denied: {error}")
+        else:
+            log.error("%s: Google Drive API error (%s) during download/export: %s", log_prefix, error.resp.status, error)
+            driveup_logger.log_file_status(str(final_local_path), "failed", f"API error {error.resp.status}: {error}")
+        
         # Clean up potentially partial file
         if final_local_path.exists():
             try: final_local_path.unlink(missing_ok=True)
             except OSError as e: log.warning(f"Could not remove partially downloaded file {final_local_path}: {e}")
-        driveup_logger.log_file_status(str(final_local_path), "failed", f"API error: {error}")
         return False, final_local_path
     except IOError as e:
         log.error("%s: File system error writing %s: %s", log_prefix, final_local_path, e)
@@ -267,10 +352,14 @@ def download_file(
         log.info("%s: Exporting formulas and values from sheets...", log_prefix)
         try:
             spreadsheet = gspread_client.open_by_key(item_id)
-            for worksheet in spreadsheet.worksheets():
+            worksheets = spreadsheet.worksheets()
+            total_sheets = len(worksheets)
+            log.warning("%s: HEARTBEAT: Starting Google Sheets processing - %d sheets total", log_prefix, total_sheets)
+            
+            for sheet_idx, worksheet in enumerate(worksheets, 1):
                 # Add delay to avoid hitting Sheets API quota limits
                 time.sleep(config.SHEETS_API_DELAY_SECONDS)
-                log.info("%s: Processing sheet '%s'", log_prefix, worksheet.title)
+                log.warning("%s: HEARTBEAT: Processing sheet %d/%d - '%s'", log_prefix, sheet_idx, total_sheets, worksheet.title)
                 worksheet_safe_name = utils.sanitize_filename(worksheet.title)
                 # Create CSV paths relative to the downloaded .xlsx file
                 csv_formulas_path = final_local_path.parent / f"{final_local_path.stem}.{worksheet_safe_name}.formulas.csv"
@@ -319,6 +408,13 @@ def download_file(
                     else:
                         log.info("%s: Sheet '%s' has no formulas, skipping CSV creation", log_prefix, worksheet.title)
                         driveup_logger.log_file_status(str(csv_formulas_path), "skipped", "No formulas found")
+                    
+                    # Heartbeat after each sheet completion
+                    log.warning("%s: HEARTBEAT: Completed sheet %d/%d - '%s'", log_prefix, sheet_idx, total_sheets, worksheet.title)
+                    
+                    # Additional diagnostic logging for the last sheet
+                    if sheet_idx == total_sheets:
+                        log.warning("%s: HEARTBEAT: LAST SHEET COMPLETED - finishing Google Sheets processing", log_prefix)
 
                 except IOError as io_err:
                     log.error("%s: Error writing formula CSV file %s: %s", log_prefix, csv_formulas_path, io_err)
@@ -341,8 +437,16 @@ def download_file(
         except Exception as e:
             log.error("%s: Unknown error processing sheet '%s': %s", log_prefix, item_name, e, exc_info=True)
             driveup_logger.log_file_status(str(final_local_path), "failed", f"Unknown error processing sheet: {e}")
+        else:
+            # Success - log completion heartbeat
+            log.warning("%s: HEARTBEAT: Google Sheets processing COMPLETED - %d sheets processed", log_prefix, total_sheets)
+        
+        # Additional diagnostic logging after try/except block
+        log.warning("%s: HEARTBEAT: Exiting Google Sheets post-processing block", log_prefix)
 
     # Removed S3 upload block for general files
 
     # Return download success status and the final path (which includes extension)
-    return download_success, final_local_path 
+    log.warning("%s: HEARTBEAT: download_file() returning - success=%s, path=%s", log_prefix, download_success, final_local_path)
+    return download_success, final_local_path
+
