@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import ssl
 import time
 from pathlib import Path
 from typing import Dict, Optional, Any, Set, Tuple
@@ -14,6 +15,7 @@ from . import config
 from . import utils
 from . import state_manager
 from . import file_processor
+from . import rate_limiter
 
 log = logging.getLogger(__name__)
 
@@ -405,7 +407,8 @@ def perform_full_sync(
     drive_backup_dir: Path,
     state_map: Dict[str, Dict[str, Any]], # Pass the state map to populate it
     processed_shared_drive_ids: Set[str], # To skip shared drive items during My Drive sync
-    dry_run: bool = False
+    dry_run: bool = False,
+    max_retries: int = 10  # Increased from 3 to 10 for SSL stability
 ) -> Tuple[int, int, int, int, int]: # Returns processed, downloaded, deleted, failed, shortcuts_skipped counts
     """
     Performs a full sync by listing all files using files.list.
@@ -439,13 +442,47 @@ def perform_full_sync(
         else:
             list_params["corpora"] = "user" # For My Drive
 
-        # Fetch loop
+        # Fetch loop with retry logic
         while True:
             if page_token: list_params["pageToken"] = page_token
             else: list_params.pop("pageToken", None)
 
-            results = drive_service.files().list(**list_params).execute()
-            items = results.get("files", [])
+            # Retry logic for API calls with rate limiting
+            limiter = rate_limiter.get_rate_limiter()
+            for retry_attempt in range(max_retries):
+                try:
+                    if retry_attempt > 0:
+                        log.info(f"🔄 Retry attempt {retry_attempt + 1}/{max_retries} for drive '{drive_name}' API call")
+                    
+                    # Use rate limiter to prevent overwhelming the API
+                    with limiter:
+                        results = drive_service.files().list(**list_params).execute()
+                    
+                    items = results.get("files", [])
+                    if retry_attempt > 0:
+                        log.info(f"✅ API call succeeded on attempt {retry_attempt + 1} for drive '{drive_name}'")
+                    break  # Success, exit retry loop
+                except ssl.SSLError as e:
+                    # Report SSL error to rate limiter for adaptive throttling
+                    limiter.report_ssl_error()
+                    
+                    if retry_attempt < max_retries - 1:
+                        # Exponential backoff with longer delays for SSL issues
+                        base_delay = min(30, (3 ** retry_attempt))  # Cap at 30 seconds
+                        jitter = random.uniform(0, 5)  # Add more jitter
+                        wait_time = base_delay + jitter
+                        log.warning(f"SSL error during API call for '{drive_name}' (attempt {retry_attempt + 1}/{max_retries}): {e}. Retrying in {wait_time:.1f}s...")
+                        time.sleep(wait_time)
+                    else:
+                        log.error(f"SSL error during API call for '{drive_name}' after {max_retries} attempts: {e}")
+                        raise
+                except HttpError as e:
+                    if retry_attempt < max_retries - 1 and e.resp.status >= 500:
+                        wait_time = (2 ** retry_attempt) + random.uniform(0, 1)
+                        log.warning(f"Server error {e.resp.status} during API call for '{drive_name}' (attempt {retry_attempt + 1}/{max_retries}): {e}. Retrying in {wait_time:.1f}s...")
+                        time.sleep(wait_time)
+                    else:
+                        raise
 
             for item in items:
                 # Skip shortcuts (though field wasn't requested, good practice)
@@ -505,10 +542,13 @@ def perform_full_sync(
 
     except HttpError as error:
         log.error(f"API error during full scan of '{drive_name}': {error}. Full sync aborted.", exc_info=True)
-        return processed_count, downloaded_count, deleted_count, 1 # Return 1 failure
+        return processed_count, downloaded_count, deleted_count, 1, shortcuts_skipped_count # Return 1 failure
+    except ssl.SSLError as e:
+        log.error(f"SSL connection error during full scan of '{drive_name}': {e}. Full sync aborted.")
+        return processed_count, downloaded_count, deleted_count, 1, shortcuts_skipped_count # Return 1 failure
     except Exception as e:
         log.error(f"Unknown error during full scan of '{drive_name}': {e}. Full sync aborted.", exc_info=True)
-        return processed_count, downloaded_count, deleted_count, 1 # Return 1 failure
+        return processed_count, downloaded_count, deleted_count, 1, shortcuts_skipped_count # Return 1 failure
 
     # --- 1.5 Item Sampling for Dry Run ---
     items_to_process_list = list(all_items_map.values())

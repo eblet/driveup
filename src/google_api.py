@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 # Google Auth Libraries
 from google.auth.transport.requests import Request
@@ -23,11 +23,33 @@ from . import config
 log = logging.getLogger(__name__)
 
 # --- API and File Processing Functions ---
-def get_credentials() -> Optional[Credentials]:
+
+
+def create_service_clients_from_creds(creds: Credentials) -> Tuple[Resource, Optional[gspread.Client]]:
+    """
+    Create thread-safe Google Drive and Sheets API clients from credentials.
+
+    Args:
+        creds: Google API credentials.
+
+    Returns:
+        A tuple containing the Drive service resource and gspread client.
+    """
+    drive_service = build('drive', 'v3', credentials=creds)
+    gspread_client = None
+    try:
+        gspread_client = gspread.authorize(creds)
+    except Exception as e:
+        log.warning(f"Failed to initialize Google Sheets API client in thread: {e}")
+    
+    return drive_service, gspread_client
+
+
+def get_credentials(token_path: Path = Path(config.TOKEN_FILE), creds_path: Path = Path(config.CREDENTIALS_FILE)) -> Optional[Credentials]:
     """Gets valid Google API credentials, refreshing or initiating OAuth flow if necessary."""
     creds = None
-    token_path = Path(config.TOKEN_FILE)
-    creds_path = Path(config.CREDENTIALS_FILE)
+    # token_path = Path(config.TOKEN_FILE) # This line is now redundant as token_path is passed as an argument
+    # creds_path = Path(config.CREDENTIALS_FILE) # This line is now redundant as creds_path is passed as an argument
 
     if token_path.exists():
         try:
