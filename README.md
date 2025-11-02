@@ -91,9 +91,3 @@ docker compose run --rm driveup python main.py --incremental \
   --s3-access-key your-access-key \
   --s3-secret-key your-secret-key
 ```
-
-## Detailed Documentation
-
-For complete setup instructions (Google Cloud prerequisites, first authorization, configuration options, troubleshooting, and more), please refer to the full documentation:
-
-**[https://eblet.tech/scripts/driveup/docs_full.html](https://eblet.tech/scripts/driveup/docs_full.html)**
