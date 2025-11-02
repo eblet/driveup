@@ -1,14 +1,14 @@
 services:
   driveup:
-    image: ${DOCKER_REGISTRY}/gu42/terraform/scripts/driveup:latest
+    build: .
     container_name: driveup
     volumes:
       - ./credentials.json:/app/credentials.json:ro
       - ./token.json:/app/token.json
       - ./.env:/app/.env:ro
-      - /opt/driveup/backup:/app/driveup_backup
-      - /opt/driveup/state:/app/driveup_state
-      - /opt/driveup/archive:/app/archive
-      - /opt/driveup/logs:/app/driveup_logs
+      - ./driveup_backup:/app/driveup_backup
+      - ./driveup_state:/app/driveup_state
+      - ./driveup_archive:/app/driveup_archive
+      - ./driveup_logs:/app/driveup_logs
     stdin_open: true
     tty: true
